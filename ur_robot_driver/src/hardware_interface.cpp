@@ -72,10 +72,6 @@ CallbackReturn URPositionHardwareInterface::on_init(const hardware_interface::Ha
   system_interface_initialized_ = 0.0;
 
   for (const hardware_interface::ComponentInfo& joint : info_.joints) {
-    if (joint.name == "gpio" || joint.name == "speed_scaling" || joint.name == "resend_robot_program" ||
-        joint.name == "system_interface") {
-      continue;
-    }
     if (joint.command_interfaces.size() != 2) {
       RCLCPP_FATAL(rclcpp::get_logger("URPositionHardwareInterface"),
                    "Joint '%s' has %zu command interfaces found. 2 expected.", joint.name.c_str(),
@@ -133,10 +129,6 @@ std::vector<hardware_interface::StateInterface> URPositionHardwareInterface::exp
 {
   std::vector<hardware_interface::StateInterface> state_interfaces;
   for (size_t i = 0; i < info_.joints.size(); ++i) {
-    if (info_.joints[i].name == "gpio" || info_.joints[i].name == "speed_scaling" ||
-        info_.joints[i].name == "resend_robot_program" || info_.joints[i].name == "system_interface") {
-      continue;
-    }
     state_interfaces.emplace_back(hardware_interface::StateInterface(
         info_.joints[i].name, hardware_interface::HW_IF_POSITION, &urcl_joint_positions_[i]));
 
@@ -214,10 +206,6 @@ std::vector<hardware_interface::CommandInterface> URPositionHardwareInterface::e
 {
   std::vector<hardware_interface::CommandInterface> command_interfaces;
   for (size_t i = 0; i < info_.joints.size(); ++i) {
-    if (info_.joints[i].name == "gpio" || info_.joints[i].name == "speed_scaling" ||
-        info_.joints[i].name == "resend_robot_program" || info_.joints[i].name == "system_interface") {
-      continue;
-    }
     command_interfaces.emplace_back(hardware_interface::CommandInterface(
         info_.joints[i].name, hardware_interface::HW_IF_POSITION, &urcl_position_commands_[i]));
 
@@ -238,6 +226,16 @@ std::vector<hardware_interface::CommandInterface> URPositionHardwareInterface::e
 
   command_interfaces.emplace_back(hardware_interface::CommandInterface(
       "resend_robot_program", "resend_robot_program_async_success", &resend_robot_program_async_success_));
+
+  command_interfaces.emplace_back(hardware_interface::CommandInterface("payload", "mass", &payload_mass_));
+  command_interfaces.emplace_back(
+      hardware_interface::CommandInterface("payload", "cog.x", &payload_center_of_gravity_[0]));
+  command_interfaces.emplace_back(
+      hardware_interface::CommandInterface("payload", "cog.y", &payload_center_of_gravity_[1]));
+  command_interfaces.emplace_back(
+      hardware_interface::CommandInterface("payload", "cog.z", &payload_center_of_gravity_[2]));
+  command_interfaces.emplace_back(
+      hardware_interface::CommandInterface("payload", "payload_async_success", &payload_async_success_));
 
   for (size_t i = 0; i < 18; ++i) {
     command_interfaces.emplace_back(hardware_interface::CommandInterface(
@@ -288,7 +286,8 @@ CallbackReturn URPositionHardwareInterface::on_activate(const rclcpp_lifecycle::
   // A longer lookahead time can smooth the trajectory.
   double servoj_lookahead_time = stod(info_.hardware_parameters["servoj_lookahead_time"]);
 
-  bool use_tool_communication = static_cast<bool>(stoi(info_.hardware_parameters["use_tool_communication"]));
+  bool use_tool_communication = (info_.hardware_parameters["use_tool_communication"] == "true") ||
+                                (info_.hardware_parameters["use_tool_communication"] == "True");
 
   // Hash of the calibration reported by the robot. This is used for validating the robot
   // description is using the correct calibration. If the robot's calibration doesn't match this
@@ -363,8 +362,8 @@ CallbackReturn URPositionHardwareInterface::on_activate(const rclcpp_lifecycle::
     ur_driver_ = std::make_unique<urcl::UrDriver>(
         robot_ip, script_filename, output_recipe_filename, input_recipe_filename,
         std::bind(&URPositionHardwareInterface::handleRobotProgramState, this, std::placeholders::_1), headless_mode,
-        std::move(tool_comm_setup), calibration_checksum, (uint32_t)reverse_port, (uint32_t)script_sender_port,
-        servoj_gain, servoj_lookahead_time, non_blocking_read_);
+        std::move(tool_comm_setup), (uint32_t)reverse_port, (uint32_t)script_sender_port, servoj_gain,
+        servoj_lookahead_time, non_blocking_read_);
   } catch (urcl::ToolCommNotAvailable& e) {
     RCLCPP_FATAL_STREAM(rclcpp::get_logger("URPositionHardwareInterface"), "See parameter use_tool_communication");
 
@@ -372,6 +371,22 @@ CallbackReturn URPositionHardwareInterface::on_activate(const rclcpp_lifecycle::
   } catch (urcl::UrException& e) {
     RCLCPP_FATAL_STREAM(rclcpp::get_logger("URPositionHardwareInterface"), e.what());
     return CallbackReturn::ERROR;
+  }
+  RCLCPP_INFO(rclcpp::get_logger("URPositionHardwareInterface"), "Calibration checksum: '%s'.",
+              calibration_checksum.c_str());
+  // check calibration
+  // https://github.com/UniversalRobots/Universal_Robots_ROS_Driver/blob/c3378599d5fa73a261328b326392e847f312ab6b/ur_robot_driver/src/hardware_interface.cpp#L296-L309
+  if (ur_driver_->checkCalibration(calibration_checksum)) {
+    RCLCPP_INFO(rclcpp::get_logger("URPositionHardwareInterface"), "Calibration checked successfully.");
+  } else {
+    RCLCPP_ERROR_STREAM(rclcpp::get_logger("URPositionHardwareInterface"),
+
+                        "The calibration parameters of the connected robot don't match the ones from the given "
+                        "kinematics config file. Please be aware that this can lead to critical inaccuracies of tcp "
+                        "positions. Use the ur_calibration tool to extract the correct calibration from the robot and "
+                        "pass that into the description. See "
+                        "[https://github.com/UniversalRobots/Universal_Robots_ROS2_Driver/blob/main/ur_calibration/"
+                        "README.md] for details.");
   }
 
   ur_driver_->startRTDECommunication();
@@ -521,6 +536,9 @@ hardware_interface::return_type URPositionHardwareInterface::read()
 
 hardware_interface::return_type URPositionHardwareInterface::write()
 {
+  // If there is no interpreting program running on the robot, we do not want to send anything.
+  // TODO(anyone): We would still like to disable the controllers requiring a writable interface. In ROS1
+  // this was done externally using the controller_stopper.
   if ((runtime_state_ == static_cast<uint32_t>(rtde::RUNTIME_STATE::PLAYING) ||
        runtime_state_ == static_cast<uint32_t>(rtde::RUNTIME_STATE::PAUSING)) &&
       robot_program_running_ && (!non_blocking_read_ || packet_read_)) {
@@ -535,12 +553,8 @@ hardware_interface::return_type URPositionHardwareInterface::write()
     }
 
     packet_read_ = false;
-
-    return hardware_interface::return_type::OK;
   }
 
-  RCLCPP_ERROR(rclcpp::get_logger("URPositionHardwareInterface"), "Unable to write to hardware...");
-  // TODO(anyone): could not read from the driver --> return ERROR --> on error will be called
   return hardware_interface::return_type::OK;
 }
 
@@ -558,6 +572,9 @@ void URPositionHardwareInterface::initAsyncIO()
   for (size_t i = 0; i < 2; ++i) {
     standard_analog_output_cmd_[i] = NO_NEW_CMD_;
   }
+
+  payload_mass_ = NO_NEW_CMD_;
+  payload_center_of_gravity_ = { NO_NEW_CMD_, NO_NEW_CMD_, NO_NEW_CMD_ };
 }
 
 void URPositionHardwareInterface::checkAsyncIO()
@@ -597,6 +614,26 @@ void URPositionHardwareInterface::checkAsyncIO()
       RCLCPP_ERROR(rclcpp::get_logger("URPositionHardwareInterface"), "Service Call failed: '%s'", e.what());
     }
     resend_robot_program_cmd_ = NO_NEW_CMD_;
+  }
+
+  if (!std::isnan(payload_mass_) && !std::isnan(payload_center_of_gravity_[0]) &&
+      !std::isnan(payload_center_of_gravity_[1]) && !std::isnan(payload_center_of_gravity_[2]) &&
+      ur_driver_ != nullptr) {
+    try {
+      // create command as string from interfaces
+      // ROS1 driver hardware_interface.cpp#L450-L456
+      std::stringstream str_command;
+      str_command.imbue(std::locale::classic());
+      str_command << "sec setup():" << std::endl
+                  << " set_payload(" << payload_mass_ << ", [" << payload_center_of_gravity_[0] << ", "
+                  << payload_center_of_gravity_[1] << ", " << payload_center_of_gravity_[2] << "])" << std::endl
+                  << "end";
+      payload_async_success_ = ur_driver_->sendScript(str_command.str());
+    } catch (const urcl::UrException& e) {
+      RCLCPP_ERROR(rclcpp::get_logger("URPositionHardwareInterface"), "Service Call failed: '%s'", e.what());
+    }
+    payload_mass_ = NO_NEW_CMD_;
+    payload_center_of_gravity_ = { NO_NEW_CMD_, NO_NEW_CMD_, NO_NEW_CMD_ };
   }
 }
 
