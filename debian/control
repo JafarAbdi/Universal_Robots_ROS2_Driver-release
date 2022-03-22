@@ -1,0 +1,12 @@
+Source: ros-rolling-ur-robot-driver
+Section: misc
+Priority: optional
+Maintainer: Marvin Große Besselmann <grosse@fzi.de>
+Build-Depends: debhelper (>= 9.0.0), ros-rolling-ament-cmake, ros-rolling-ament-cmake-python, ros-rolling-controller-manager, ros-rolling-geometry-msgs, ros-rolling-hardware-interface, ros-rolling-launch-testing-ament-cmake, ros-rolling-pluginlib, ros-rolling-rclcpp, ros-rolling-rclpy, ros-rolling-std-srvs, ros-rolling-tf2-geometry-msgs, ros-rolling-ur-bringup, ros-rolling-ur-client-library, ros-rolling-ur-controllers, ros-rolling-ur-dashboard-msgs, ros-rolling-ur-description, ros-rolling-ur-msgs, ros-rolling-ros-workspace
+Homepage: 
+Standards-Version: 3.9.2
+
+Package: ros-rolling-ur-robot-driver
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, ros-rolling-controller-manager, ros-rolling-geometry-msgs, ros-rolling-hardware-interface, ros-rolling-launch-testing-ament-cmake, ros-rolling-pluginlib, ros-rolling-rclcpp, ros-rolling-rclpy, ros-rolling-std-srvs, ros-rolling-tf2-geometry-msgs, ros-rolling-ur-bringup, ros-rolling-ur-client-library, ros-rolling-ur-controllers, ros-rolling-ur-dashboard-msgs, ros-rolling-ur-description, ros-rolling-ur-msgs, ros-rolling-ros-workspace
+Description: The new driver for Universal Robots UR3, UR5 and UR10 robots with CB3 controllers and the e-series.
